@@ -32,6 +32,49 @@ local function build_no_suite_failure_results(node)
     return failures
 end
 
+local function strip_trailing_slash(path)
+    return (path:gsub("/+$", ""))
+end
+
+local function dirname(path)
+    return strip_trailing_slash(path):match("^(.*)/[^/]+$")
+end
+
+local function dir_exists(path)
+    local stat = vim.loop.fs_stat(path)
+    return stat ~= nil and stat.type == "directory"
+end
+
+--- Locate the JUnit XML report dir from the Test target's actual classes dir
+--- rather than assuming a fixed layout: sbt 1.x puts test-reports directly
+--- under the bare `target`, two levels above crossTarget/test-classes, while
+--- sbt 2.x resolves `target` itself to the crossTarget-equivalent path, so
+--- test-reports is a direct sibling of test-classes.
+---@param build_target_info neotest-scala.BuildTargetInfo|nil
+---@param project_dir string
+---@return string
+local function resolve_report_prefix(build_target_info, project_dir)
+    local classes_dir_values = build_target_info
+        and (build_target_info["Scala Classes Directory"] or build_target_info["Classes Directory"])
+    local classes_dir_raw = classes_dir_values and classes_dir_values[1]
+
+    if classes_dir_raw then
+        local classes_dir = strip_trailing_slash(classes_dir_raw:match("^file:(.*)") or classes_dir_raw)
+
+        local sbt2_candidate = dirname(classes_dir)
+        if sbt2_candidate and dir_exists(sbt2_candidate .. "/test-reports") then
+            return sbt2_candidate .. "/test-reports/"
+        end
+
+        local sbt1_candidate = sbt2_candidate and dirname(sbt2_candidate)
+        if sbt1_candidate and dir_exists(sbt1_candidate .. "/test-reports") then
+            return sbt1_candidate .. "/test-reports/"
+        end
+    end
+
+    return project_dir .. "target/test-reports/"
+end
+
 local function collect_namespaces(framework, node, report_prefix)
     local ns_data = node:data()
     local namespaces = {}
@@ -141,7 +184,7 @@ function M.collect(spec, result, node)
         return {}
     end
 
-    local report_prefix = project_dir .. "target/test-reports/"
+    local report_prefix = resolve_report_prefix(build_target_info, project_dir)
     local namespaces = collect_namespaces(framework, node, report_prefix)
 
     if not namespaces then
