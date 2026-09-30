@@ -44,12 +44,31 @@ local query = [[
 )
 ]]
 
-local junit_query = ts.query.parse("xml", query)
+local junit_query = nil
+
+local function get_junit_query()
+    if junit_query == nil then
+        local ok, parsed_query = pcall(ts.query.parse, "xml", query)
+        junit_query = ok and parsed_query or false
+        if not ok then
+            vim.schedule(function()
+                vim.print("[neotest-scala] Failed to load xml treesitter parser: " .. tostring(parsed_query))
+            end)
+        end
+    end
+
+    return junit_query or nil
+end
 
 ---@param ns neotest-scala.JunitNamespace
 ---@return neotest-scala.JUnitTest[]
 M.collect_results = function(ns)
     local results = {}
+
+    local ts_query = get_junit_query()
+    if not ts_query then
+        return {}
+    end
 
     local success, junit_xml = pcall(lib.files.read, ns.report_path)
     if not success then
@@ -59,7 +78,7 @@ M.collect_results = function(ns)
     local report_tree = ts.get_string_parser(junit_xml, "xml")
     local parsed = report_tree:parse()[1]
 
-    local query_results = junit_query:iter_matches(parsed:root(), report_tree:source())
+    local query_results = ts_query:iter_matches(parsed:root(), report_tree:source())
 
     for _, matches, _ in query_results do
         local test_name_node = matches[3] and matches[3][1]
