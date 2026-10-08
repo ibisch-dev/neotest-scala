@@ -131,6 +131,7 @@ function M.find_node(tree, type, down)
 end
 
 --- Get package name from top of file
+--- Scans the first N lines for a `package` declaration (handles header comments).
 ---@param path string
 ---@return string|nil
 function M.get_package_name(path)
@@ -138,9 +139,11 @@ function M.get_package_name(path)
     if not success then
         return nil
     end
-    local line = lines[1]
-    if vim.startswith(line, "package") then
-        return vim.split(line, " ")[2] .. "."
+    for i = 1, math.min(#lines, 20) do
+        local line = lines[i]
+        if vim.startswith(line, "package") then
+            return vim.split(line, " ")[2] .. "."
+        end
     end
     return ""
 end

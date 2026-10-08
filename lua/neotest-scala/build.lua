@@ -299,6 +299,12 @@ local function build_test_namespace(tree)
         local ns_data = ns_node:data()
         return package .. ns_data.name
     else
+        -- Fallback: derive class name from file name when namespace node is missing
+        local file_name = utils.get_file_name(path)
+        local class_name = file_name:match("^(%w+)%.scala$")
+        if class_name then
+            return package .. class_name
+        end
         return package .. "*"
     end
 end
