@@ -32,6 +32,100 @@ local function build_no_suite_failure_results(node)
     return failures
 end
 
+local function strip_trailing_slash(path)
+    return (path:gsub("/+$", ""))
+end
+
+local function dirname(path)
+    return strip_trailing_slash(path):match("^(.*)/[^/]+$")
+end
+
+local function dir_exists(path)
+    local stat = vim.loop.fs_stat(path)
+    return stat ~= nil and stat.type == "directory"
+end
+
+--- Recursively search for the most recent test-reports directory under a given root.
+--- Returns the path with a trailing slash, or nil if not found.
+---@param root string
+---@return string|nil
+local function find_test_reports(root)
+    local ok, handle = pcall(vim.loop.fs_scandir, root)
+    if not ok or not handle then
+        return nil
+    end
+    local best_path = nil
+    local best_time = 0
+    local function scan(dir)
+        local entries = vim.loop.fs_scandir(dir)
+        if not entries then
+            return
+        end
+        for entry in entries() do
+            local full = dir .. "/" .. entry
+            local stat = vim.loop.fs_stat(full)
+            if not stat then
+                return
+            end
+            if stat.type == "directory" then
+                if entry == "test-reports" then
+                    local mtime = stat.mtime and stat.mtime.sec or 0
+                    if mtime > best_time then
+                        best_time = mtime
+                        best_path = full .. "/"
+                    end
+                else
+                    scan(full)
+                end
+            end
+        end
+    end
+    scan(root)
+    return best_path
+end
+
+--- Locate the JUnit XML report dir from the Test target's actual classes dir
+--- rather than assuming a fixed layout: sbt 1.x puts test-reports directly
+--- under the bare `target`, two levels above crossTarget/test-classes, while
+--- sbt 2.x resolves `target` itself to the crossTarget-equivalent path, so
+--- test-reports is a direct sibling of test-classes.
+--- Falls back to a recursive search under `target/` for sbt 2.x nested layouts.
+---@param build_target_info neotest-scala.BuildTargetInfo|nil
+---@param project_dir string
+---@return string
+local function resolve_report_prefix(build_target_info, project_dir)
+    local classes_dir_values = build_target_info
+        and (build_target_info["Scala Classes Directory"] or build_target_info["Classes Directory"])
+    local classes_dir_raw = classes_dir_values and classes_dir_values[1]
+
+    if classes_dir_raw then
+        local classes_dir = strip_trailing_slash(classes_dir_raw:match("^file:(.*)") or classes_dir_raw)
+
+        local sbt2_candidate = dirname(classes_dir)
+        if sbt2_candidate and dir_exists(sbt2_candidate .. "/test-reports") then
+            return sbt2_candidate .. "/test-reports/"
+        end
+
+        local sbt1_candidate = sbt2_candidate and dirname(sbt2_candidate)
+        if sbt1_candidate and dir_exists(sbt1_candidate .. "/test-reports") then
+            return sbt1_candidate .. "/test-reports/"
+        end
+    end
+
+    -- Fallback: search for the most recent test-reports directory under the project root.
+    -- This handles sbt 2.x nested target layouts (e.g. target/out/jvm/scala-3.9.0/.../test-reports)
+    -- that don't match the classes directory from Metals.
+    local target_dir = project_dir .. "target"
+    if dir_exists(target_dir) then
+        local found = find_test_reports(target_dir)
+        if found then
+            return found
+        end
+    end
+
+    return project_dir .. "target/test-reports/"
+end
+
 local function collect_namespaces(framework, node, report_prefix)
     local ns_data = node:data()
     local namespaces = {}
@@ -71,18 +165,34 @@ function M.collect(spec, result, node)
         end
     end
 
-    local success, output = pcall(lib.files.read, result.output)
-    if not success then
-        vim.print("[neotest-scala] Failed to read test output")
-        results_logger.error("Failed to read test output", { file = run_file })
+    results_logger.debug({
+        event = "results:collect:entry",
+        has_spec_env = spec.env ~= nil,
+        result_output = result.output,
+    }, { file = run_file })
+
+    -- lib.files.read is async, so call it directly (not in pcall)
+    local output
+    local ok, err = pcall(function()
+        output = lib.files.read(result.output)
+    end)
+    if not ok or not output then
+        vim.print("[neotest-scala] Failed to read test output: " .. tostring(err))
+        results_logger.error("Failed to read test output: " .. tostring(err), { file = run_file })
         return {}
-    elseif string.match(output, "Compilation failed") then
+    end
+
+    results_logger.debug("Read test output", { file = run_file })
+
+    if string.match(output, "Compilation failed") then
         vim.print("[neotest-scala] Compilation failed")
         results_logger.warn("Compilation failed", { file = run_file })
         return {}
     end
 
     if not spec.env then
+        vim.print("[neotest-scala] spec.env is nil - returning empty results")
+        results_logger.warn("spec.env is nil", { file = run_file })
         return {}
     end
 
@@ -93,12 +203,7 @@ function M.collect(spec, result, node)
         return {}
     end
 
-    results_logger.debug({
-        event = "results:collect",
-        framework = framework.name,
-        build_tool = spec.env.build_tool,
-        dap = is_dap_run(spec.strategy),
-    }, { file = run_file })
+    results_logger.debug("Collecting results", { file = run_file })
 
     if is_dap_run(spec.strategy) then
         if output:match("No test suites were run%.?") then
@@ -141,12 +246,22 @@ function M.collect(spec, result, node)
         return {}
     end
 
-    local report_prefix = project_dir .. "target/test-reports/"
+    local report_prefix = resolve_report_prefix(build_target_info, project_dir)
+
     local namespaces = collect_namespaces(framework, node, report_prefix)
 
-    if not namespaces then
-        return {}
+    if not namespaces or #namespaces == 0 then
+        -- Fallback: when tree has no children, parse results from stdout output
+        results_logger.debug("Falling back to stdout parsing", { file = run_file })
+        local stdout_results = framework.parse_stdout_results(output, node)
+        if type(stdout_results) == "table" and next(stdout_results) ~= nil then
+            return stdout_results
+        end
+
+        -- If stdout parsing also fails, try to build results from JUnit XML directly
+        return M._collect_results_from_junit(framework, node, report_prefix, output)
     end
+
 
     local test_results = {}
 
@@ -176,6 +291,62 @@ function M.collect(spec, result, node)
 
             test_results[position.id] = test_result
         end
+    end
+
+    return test_results
+end
+
+--- Fallback: when the test tree has no children, parse JUnit XML reports directly
+--- and build results keyed by the file path.
+function M._collect_results_from_junit(framework, node, report_prefix, output)
+    local ns_data = node:data()
+    local path = ns_data.path
+    local package_name = utils.get_package_name(path) or ""
+    local file_name = utils.get_file_name(path)
+    local class_name = file_name:match("^(%w+)%.scala$") or file_name
+
+    local namespace = package_name .. class_name
+    local report_path = report_prefix .. "TEST-" .. namespace .. ".xml"
+
+    local ns = {
+        path = path,
+        namespace = namespace,
+        report_path = report_path,
+        tests = {},
+    }
+
+    local junit_results = junit.collect_results(ns)
+
+    -- Build a result for each test found in the JUnit XML
+    local test_results = {}
+    for _, test in ipairs(ns.tests) do
+        local position = test:data()
+        local test_result = framework.build_position_result({
+            position = position,
+            test_node = test,
+            junit_results = junit_results,
+            namespace = ns,
+        })
+        if test_result then
+            test_results[position.id] = test_result
+        end
+    end
+
+    -- If JUnit XML has results but tree has no positions, create a file-level result
+    if not next(test_results) and next(junit_results) then
+        local has_failures = false
+        for _, jr in ipairs(junit_results) do
+            if jr.status == "Failure" or jr.status == "Error" then
+                has_failures = true
+                break
+            end
+        end
+
+        local status = has_failures and TEST_FAILED and TEST_FAILED or TEST_PASS
+        -- Use the file path as the result key
+        test_results[path] = { status = has_failures and "failed" or "passed" }
+
+        results_logger.debug("JUnit fallback result", { file = path })
     end
 
     return test_results

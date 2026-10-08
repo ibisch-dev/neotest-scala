@@ -80,7 +80,7 @@ function adapter.discover_positions(path)
 
     local frameworks = metals.get_frameworks(root, path, cache_build_info)
     if not frameworks or #frameworks == 0 then
-        return {}
+        frameworks = { "scalatest", "munit", "specs2", "utest", "zio-test" }
     end
 
     local tree = fw.select_framework_tree({

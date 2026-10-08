@@ -29,6 +29,15 @@ local FRAMEWORK_MARKERS = {
         "extends%s+AnyFeatureSpec",
         "extends%s+AsyncFeatureSpec",
         "extends%s+FixtureAnyFeatureSpec",
+        "extends%s+UnitSpec",
+        "extends%s+UnitIOSpec",
+        "extends%s+[%w%.]*Spec",
+        "behavior%s+of",
+        "it%s+should",
+        "it%s+must",
+        "it%s+can",
+        "describe%s*%(",
+        "Feature%s*%(",
     },
     munit = {
         "org%.scalameta%.munit",
@@ -39,6 +48,7 @@ local FRAMEWORK_MARKERS = {
         "extends%s+DisciplineSuite",
         "extends%s+ZSuite",
         "extends%s+ZIOSuite",
+        "extends%s+[%w%.]*Suite",
     },
     specs2 = {
         "org%.specs2",
@@ -170,7 +180,7 @@ function M.select_framework_tree(opts)
 
             if tree then
                 local test_count, namespace_count = count_discovered_positions(tree)
-                if test_count > 0 then
+                if test_count > 0 or namespace_count > 0 then
                     local score = test_count * 10 + namespace_count * 3 + marker_score(content, fw_name) * 20
 
                     local is_better = best_score == nil

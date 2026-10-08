@@ -112,23 +112,28 @@ local function detect_style(content)
         return "refspec"
     end
 
+    -- Fallback heuristics based on syntax markers in file content
+    if content:match("%f[%w]behavior%s+of%s+\"") or content:match("%f[%w]it%s+should%s+\"") or content:match("%f[%w]it%s+must%s+\"") or content:match("%f[%w]it%s+can%s+\"") or content:match("%f[%w]they%s+should%s+\"") or content:match("\"%s+should%s+\"") or content:match("\"%s+must%s+\"") or content:match("\"%s+can%s+\"") then
+        return "flatspec"
+    elseif content:match("%f[%w]describe%s*%(") or content:match("%f[%w]it%s*%(") then
+        return "funspec"
+    elseif content:match("%f[%w]Feature%s*%(") or content:match("%f[%w]Scenario%s*%(") then
+        return "featurespec"
+    elseif content:match("%f[%w]property%s*%(") then
+        return "propspec"
+    elseif content:match("%f[%w]test%s*%(") then
+        return "funsuite"
+    elseif content:match("\"[^\"]+\"%s+should%s*{") or content:match("\"[^\"]+\"%s+must%s*{") or content:match("\"[^\"]+\"%s+when%s*{") then
+        return "wordspec"
+    elseif content:match("\"[^\"]+\"%s*-[%s\n]*{") then
+        return "freespec"
+    end
+
     return nil
 end
 
----Discover test positions for ScalaTest
----@param opts neotest-scala.ScalaTestDiscoverOpts
----@return neotest.Tree | nil
-function M.discover_positions(opts)
-    local style = detect_style(opts.content)
-    if not style then
-        return nil
-    end
-
-    local path = opts.path
-    local query
-
-    if style == "funsuite" then
-        query = [[
+local STYLE_QUERIES = {
+    funsuite = [[
       (object_definition
         name: (identifier) @namespace.name
       ) @namespace.definition
@@ -146,9 +151,8 @@ function M.discover_positions(opts)
             (interpolated_string_expression)
           ] @test.name))
       )) @test.definition
-    ]]
-    elseif style == "propspec" then
-        query = [[
+    ]],
+    propspec = [[
       (object_definition
         name: (identifier) @namespace.name
       ) @namespace.definition
@@ -166,10 +170,8 @@ function M.discover_positions(opts)
             (interpolated_string_expression)
           ] @test.name))
       )) @test.definition
-    ]]
-    elseif style == "freespec" then
-        -- FreeSpec: "name" - { } and "name" in { }
-        query = [[
+    ]],
+    freespec = [[
       (object_definition
         name: (identifier) @namespace.name
       ) @namespace.definition
@@ -186,10 +188,8 @@ function M.discover_positions(opts)
         operator: (_) @spec_init (#any-of? @spec_init "-" "in")
         right: (_)
       ) @test.definition
-    ]]
-    elseif style == "wordspec" then
-        -- WordSpec: "A thing" should { "do X" in { ... } }
-        query = [[
+    ]],
+    wordspec = [[
       (object_definition
         name: (identifier) @namespace.name
       ) @namespace.definition
@@ -206,10 +206,8 @@ function M.discover_positions(opts)
         operator: (_) @spec_in (#eq? @spec_in "in")
         right: (_)
       ) @test.definition
-    ]]
-    elseif style == "funspec" then
-        -- FunSpec: describe("name") { it("test") { ... } }
-        query = [[
+    ]],
+    funspec = [[
       (object_definition
         name: (identifier) @namespace.name
       ) @namespace.definition
@@ -237,10 +235,8 @@ function M.discover_positions(opts)
               (interpolated_string_expression)
             ] @test.name))
       )) @test.definition
-    ]]
-    elseif style == "featurespec" then
-        -- FeatureSpec: Feature("x") { Scenario("y") { ... } }
-        query = [[
+    ]],
+    featurespec = [[
       (object_definition
         name: (identifier) @namespace.name
       ) @namespace.definition
@@ -268,10 +264,8 @@ function M.discover_positions(opts)
               (interpolated_string_expression)
             ] @test.name))
       )) @test.definition
-    ]]
-    elseif style == "refspec" then
-        -- RefSpec: discover zero-arg test methods
-        query = [[
+    ]],
+    refspec = [[
       (object_definition
         name: (identifier) @namespace.name
       ) @namespace.definition
@@ -290,51 +284,112 @@ function M.discover_positions(opts)
           !parameters
         )
       ] @test.definition
-    ]]
-    else
-        -- FlatSpec:
-        -- "A Stack" should "pop values" in { }
-        -- it should "throw..." in { }
-        query = [[
-            (object_definition
-                name: (identifier) @namespace.name
-            ) @namespace.definition
+    ]],
+    flatspec = [[
+      (object_definition
+        name: (identifier) @namespace.name
+      ) @namespace.definition
 
-            (class_definition
-                name: (identifier) @namespace.name
-            ) @namespace.definition
+      (class_definition
+        name: (identifier) @namespace.name
+      ) @namespace.definition
 
-            (infix_expression
-                left: (infix_expression
-                    left: (string)
-                    operator: (_) @spec_init (#any-of? @spec_init "should" "must" "can")
-                    right: [
-                      (string)
-                      (interpolated_string_expression)
-                    ] @test.name)
-                operator: (_) @spec_in (#eq? @spec_in "in")
-                right: (_)
-            ) @test.definition
+      (infix_expression
+        left: (infix_expression
+          left: (string)
+          operator: (_) @spec_init (#any-of? @spec_init "should" "must" "can")
+          right: [
+            (string)
+            (interpolated_string_expression)
+          ] @test.name)
+        operator: (_) @spec_in (#any-of? @spec_in "in" "is" "taggedAs")
+        right: (_)
+      ) @test.definition
 
-            (infix_expression
-                left: (infix_expression
-                    left: (identifier) @it_name (#eq? @it_name "it")
-                    operator: (_) @spec_init (#any-of? @spec_init "should" "must" "can")
-                    right: [
-                      (string)
-                      (interpolated_string_expression)
-                    ] @test.name)
-                operator: (_) @spec_in (#eq? @spec_in "in")
-                right: (_)
-            ) @test.definition
-        ]]
+      (infix_expression
+        left: (infix_expression
+          left: (identifier) @it_name (#any-of? @it_name "it" "they" "ignore")
+          operator: (_) @spec_init (#any-of? @spec_init "should" "must" "can")
+          right: [
+            (string)
+            (interpolated_string_expression)
+          ] @test.name)
+        operator: (_) @spec_in (#any-of? @spec_in "in" "is" "taggedAs")
+        right: (_)
+      ) @test.definition
+    ]],
+}
+
+local function tree_has_tests(tree)
+    if not tree or type(tree.iter_nodes) ~= "function" then
+        return false
+    end
+    for _, node in tree:iter_nodes() do
+        local data = node:data()
+        if data.type == "test" then
+            return true
+        end
+    end
+    return false
+end
+
+---Discover test positions for ScalaTest
+---@param opts neotest-scala.ScalaTestDiscoverOpts
+---@return neotest.Tree | nil
+function M.discover_positions(opts)
+    local path = opts.path
+    local content = opts.content
+    local style = detect_style(content)
+
+    local function parse_style(s)
+        local q = STYLE_QUERIES[s]
+        if not q then
+            return nil
+        end
+        local ok, tree = pcall(lib.treesitter.parse_positions, path, q, {
+            nested_tests = true,
+            require_namespaces = true,
+            position_id = utils.build_position_id,
+        })
+        if ok and tree and tree_has_tests(tree) then
+            return tree
+        end
+        return nil
     end
 
-    return lib.treesitter.parse_positions(path, query, {
-        nested_tests = true,
-        require_namespaces = true,
-        position_id = utils.build_position_id,
-    })
+    if style then
+        local tree = parse_style(style)
+        if tree then
+            return tree
+        end
+    end
+
+    -- If detected style didn't yield tests (or no style detected), try candidate styles
+    local candidate_styles = { "flatspec", "wordspec", "freespec", "funspec", "funsuite", "featurespec", "propspec", "refspec" }
+    for _, s in ipairs(candidate_styles) do
+        if s ~= style then
+            local tree = parse_style(s)
+            if tree then
+                return tree
+            end
+        end
+    end
+
+    -- Fallback: if file extends some spec/suite but no individual tests were matched by queries,
+    -- still parse namespace so the test suite node is available.
+    if content:match("extends%s+[%w%.]*Spec") or content:match("extends%s+[%w%.]*Suite") then
+        local q = STYLE_QUERIES["flatspec"]
+        local ok, tree = pcall(lib.treesitter.parse_positions, path, q, {
+            nested_tests = true,
+            require_namespaces = true,
+            position_id = utils.build_position_id,
+        })
+        if ok and tree then
+            return tree
+        end
+    end
+
+    return nil
 end
 
 ---Build the full test path for FreeSpec-style tests by traversing up the tree
